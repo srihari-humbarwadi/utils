@@ -153,7 +153,8 @@ def main(args):
 
     status = {}
     future_to_url = {}
-
+    
+    tik = time.time()
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=FLAGS.max_workers,
             thread_name_prefix='worker') as executor:
@@ -172,6 +173,7 @@ def main(args):
         for future in concurrent.futures.as_completed(future_to_url):
             status[future_to_url[future]] = 'done' if future.result(
             ) == 1 else 'failed'
+    tok = time.time()
 
     failed_urls = [url for url, result in status.items() if result == 'failed']
     if failed_urls:
@@ -180,7 +182,7 @@ def main(args):
             'Failed downloading {} urls. Dumping failed urls at `failed_urls.txt`'.
             format(len(failed_urls)))
     else:
-        logging.info('Successfully downloading {} urls'.format(len(urls)))
+        logging.info('Successfully downloading {} urls in {:.2f} secs'.format(len(urls), tok - tik))
 
 if __name__ == '__main__':
     app.run(main)
