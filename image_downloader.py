@@ -1,12 +1,15 @@
 import concurrent
 import concurrent.futures
+from io import BytesIO
 import os
+import requests
 import threading
 import time
 
 import numpy as np
 from absl import app, flags, logging
-from skimage.io import imread, imsave
+from PIL import Image
+from skimage.io import imsave
 
 flags.DEFINE_integer(
     name='max_workers',
@@ -89,6 +92,14 @@ def download_image_from_url(url,
                             random_sleep_time=True,
                             num_attempts=1,
                             max_attempts=3):
+    def _imread(url):
+      headers = {
+        'user-agent': '''Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Mobile Safari/537.36'''
+        }
+      response = requests.get(url, headers=headers)
+      image = Image.open(BytesIO(bytes(response.content)))
+      return np.array(image, dtype=np.uint8)
+
 
     current_thread_id = threading.current_thread().name
     file_name = os.path.basename(url)
@@ -113,14 +124,14 @@ def download_image_from_url(url,
         time.sleep(sleep_time)
 
     try:
-        image = imread(url)
+        num_attempts += 1
+        image = _imread(url)
         logging.info(
             '[Thread: {}] Successfully downloaded image: {}... on attempt {}/{}'
-            .format(current_thread_id, file_name[:10], num_attempts,
+            .format(current_thread_id, file_name[:10], num_attempts - 1,
                     max_attempts))
-        num_attempts += 1
-
-    except:
+  
+    except Exception as _:
         logging.info(
             '[Thread: {}] Failed downloading image: {} on attempt {}/{}'.format(
                 current_thread_id, file_name, num_attempts - 1, max_attempts))
