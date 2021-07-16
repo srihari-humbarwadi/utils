@@ -1,12 +1,13 @@
 import concurrent
 import concurrent.futures
-from io import BytesIO
 import os
-import requests
 import threading
 import time
+from io import BytesIO
 
 import numpy as np
+import pandas as pd
+import requests
 from absl import app, flags, logging
 from PIL import Image
 from skimage.io import imsave
@@ -16,9 +17,21 @@ flags.DEFINE_integer(
     default=1,
     help='Maximum number of concurrent workers attempting to download')
 
-flags.DEFINE_string(name='input_urls',
-                    default='',
-                    help='Text file containing one url one each line')
+flags.DEFINE_string(
+    name='input_text_file',
+    default='',
+    help='Text file containing one url one each line')
+
+flags.DEFINE_string(
+    name='input_csv_file',
+    default='',
+    help='CSV file containing one url one each line')
+
+flags.DEFINE_string(
+    name='column_name',
+    default='image_url',
+    help='column containing image urls in CSV. Used only if '
+    '`input_csv_file` is set')
 
 flags.DEFINE_string(
     name='output_folder',
@@ -30,6 +43,11 @@ flags.DEFINE_integer(
     default=-1,
     help='Number of images to download, used only if set to a non-zero integer'
     '(for each worker)')
+
+flags.DEFINE_boolean(
+    name='shuffle_urls',
+    default=False,
+    help='Shuffle urls before downloading. Used only when `max_images` is set')
 
 flags.DEFINE_integer(
     name='sleep_time',
@@ -52,29 +70,32 @@ flags.DEFINE_integer(
 flags.DEFINE_integer(
     name='max_attempts',
     default=5,
-    help=
-    'Maximum number of attempts that workers will try before a url is marked as'
+    help='Maximum number of attempts that workers will try before a url is marked as'
     '"failed"')
 
 flags.DEFINE_boolean(
     name='random_sleep_time',
     default=False,
-    help=
-    'Randomize wait time, if set to true `sleep_time` will be overided with a'
+    help='Randomize wait time, if set to true `sleep_time` will be overided with a'
     'random between `min_sleep_time` and `max_sleep_time`')
 
 flags.DEFINE_boolean(
     name='debug',
     default=False,
-    help=
-    'Log debug information')
+    help='Log debug information')
 
 FLAGS = flags.FLAGS
 
 
-def _read_urls_from_file(path):
+def _read_urls_from_text_file(path):
     with open(path, 'r') as f:
         urls = [line.strip() for line in f.readlines()]
+    return urls
+
+
+def _read_urls_from_csv_file(path, column_name):
+    df = pd.read_csv(path)
+    urls = df[column_name].values.tolist()
     return urls
 
 
@@ -93,22 +114,26 @@ def download_image_from_url(url,
                             num_attempts=1,
                             max_attempts=3):
     def _imread(url):
-      headers = {
-        'user-agent': '''Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Mobile Safari/537.36'''
+        headers = {
+            'user-agent': '''Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Mobile Safari/537.36'''
         }
-      response = requests.get(url, headers=headers)
-      image = Image.open(BytesIO(bytes(response.content)))
-      return np.array(image, dtype=np.uint8)
-
+        response = requests.get(url, headers=headers)
+        image = Image.open(BytesIO(bytes(response.content)))
+        return np.array(image, dtype=np.uint8)
 
     current_thread_id = threading.current_thread().name
     file_name = os.path.basename(url)
     file_save_path = os.path.join(output_folder, file_name)
 
+    if os.path.exists(file_save_path):
+        logging.warning('[Thread: {}] Image with name: {} already downloaded'.
+                        format(current_thread_id, file_name))
+        return 1
+
     if num_attempts > max_attempts:
         logging.info(
             '[Thread: {}] Cannot download image: {} even after {} attempts'.
-            format(current_thread_id, file_name, num_attempts))
+            format(current_thread_id, file_name, num_attempts - 1))
         return -1
 
     if not os.path.exists(output_folder):
@@ -130,7 +155,7 @@ def download_image_from_url(url,
             '[Thread: {}] Successfully downloaded image: {}... on attempt {}/{}'
             .format(current_thread_id, file_name[:10], num_attempts - 1,
                     max_attempts))
-  
+
     except Exception as _:
         logging.info(
             '[Thread: {}] Failed downloading image: {} on attempt {}/{}'.format(
@@ -148,23 +173,35 @@ def download_image_from_url(url,
 
 def main(args):
     del args
-    
+
     if FLAGS.debug:
         logging.set_verbosity(logging.DEBUG)
         logging.debug('LOGGING DEBUG MESSAGES')
     else:
         logging.set_verbosity(logging.INFO)
 
-    urls = _read_urls_from_file(FLAGS.input_urls)
+    if not FLAGS.input_text_file == '':
+        urls = _read_urls_from_text_file(path=FLAGS.input_text_file)
+
+    elif not FLAGS.input_csv_file == '':
+        urls = _read_urls_from_csv_file(
+            path=FLAGS.input_csv_file,
+            column_name=FLAGS.column_name)
+
+    else:
+        raise ValueError('No text file or csv file given!!!')
+
     if FLAGS.max_images > 0:
-        np.random.shuffle(urls)
+        if FLAGS.shuffle_urls:
+            np.random.shuffle(urls)
+
         urls = urls[:FLAGS.max_images]
-        logging.warning('Shuffled urls list and download only {} urls'.format(
+        logging.warning('Downloading only {} urls'.format(
             FLAGS.max_images))
 
     status = {}
     future_to_url = {}
-    
+
     tik = time.time()
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=FLAGS.max_workers,
@@ -193,8 +230,9 @@ def main(args):
             'Failed downloading {} urls. Dumping failed urls at `failed_urls.txt`'.
             format(len(failed_urls)))
     else:
-        logging.info('Successfully downloading {} urls in {:.2f} secs'.format(len(urls), tok - tik))
+        logging.info('Successfully downloading {} urls in {:.2f} secs'.format(
+            len(urls), tok - tik))
+
 
 if __name__ == '__main__':
     app.run(main)
-    
