@@ -1,3 +1,7 @@
+"""image_downloader.py: Download and save images from a file containing URLS."""
+
+__author__ = "Srihari Humbarwadi"
+
 import concurrent
 import concurrent.futures
 import os
@@ -86,36 +90,43 @@ flags.DEFINE_boolean(
 
 FLAGS = flags.FLAGS
 
+_COUNT = 0
+_count_lock = threading.Lock()
 
 def _read_urls_from_text_file(path):
-    with open(path, 'r') as f:
-        urls = [line.strip() for line in f.readlines()]
+    with open(path, 'r') as _fp:
+        urls = [line.strip() for line in _fp.readlines()]
     return urls
 
 
 def _read_urls_from_csv_file(path, column_name):
-    df = pd.read_csv(path)
-    urls = df[column_name].values.tolist()
+    urls = pd.read_csv(path)[column_name].values.tolist()
     return urls
 
 
 def _dump_failed_urls(urls, path='failed_urls.txt'):
-    with open(path, 'w') as f:
+    with open(path, 'w') as _fp:
         for url in urls:
-            f.writelines(url + '\n')
+            _fp.writelines(url + '\n')
 
 
-def download_image_from_url(url,
-                            output_folder,
-                            sleep_time=2,
-                            min_sleep_time=0,
-                            max_sleep_time=5,
-                            random_sleep_time=True,
-                            num_attempts=1,
-                            max_attempts=3):
+def download_image_from_url(  # pylint: disable=too-many-arguments
+        url,
+        output_folder,
+        sleep_time=2,
+        min_sleep_time=0,
+        max_sleep_time=5,
+        random_sleep_time=True,
+        num_attempts=0,
+        max_attempts=3,
+        total=0):
+
+    """Downloads and saves images from a urls"""
+    global _COUNT  # pylint: disable=global-statement
     def _imread(url):
+        """Downloads an images and returns it as an numpy array"""
         headers = {
-            'user-agent': '''Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Mobile Safari/537.36'''
+            'user-agent': '''Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Mobile Safari/537.36'''  # pylint: disable=line-too-long
         }
         response = requests.get(url, headers=headers)
         image = Image.open(BytesIO(bytes(response.content)))
@@ -126,14 +137,16 @@ def download_image_from_url(url,
     file_save_path = os.path.join(output_folder, file_name)
 
     if os.path.exists(file_save_path):
+        with _count_lock:
+            _COUNT += 1
         logging.warning('[Thread: {}] Image with name: {} already downloaded'.
                         format(current_thread_id, file_name))
         return 1
 
-    if num_attempts > max_attempts:
+    if num_attempts == max_attempts:
         logging.info(
-            '[Thread: {}] Cannot download image: {} even after {} attempts'.
-            format(current_thread_id, file_name, num_attempts - 1))
+            '[Thread: {}] Cannot download image: {} after {} attempts.'.
+            format(current_thread_id, file_name, num_attempts))
         return -1
 
     if not os.path.exists(output_folder):
@@ -152,14 +165,14 @@ def download_image_from_url(url,
         num_attempts += 1
         image = _imread(url)
         logging.info(
-            '[Thread: {}] Successfully downloaded image: {}... on attempt {}/{}'
-            .format(current_thread_id, file_name[:10], num_attempts - 1,
-                    max_attempts))
+            '[Thread: {}] [attempt: {}/{}] Successfully downloaded image: '
+            '{}...' .format(current_thread_id, num_attempts,
+                max_attempts, file_name[:10]))
 
-    except Exception as _:
+    except Exception as _:  # pylint: disable=broad-except
         logging.info(
-            '[Thread: {}] Failed downloading image: {} on attempt {}/{}'.format(
-                current_thread_id, file_name, num_attempts - 1, max_attempts))
+            '[Thread: {}]  [attempt: {}/{}] Failed downloading image: {} '
+            .format(current_thread_id, num_attempts, max_attempts, file_name))
         return download_image_from_url(url=url,
                                        output_folder=output_folder,
                                        min_sleep_time=min_sleep_time,
@@ -168,10 +181,17 @@ def download_image_from_url(url,
                                        num_attempts=num_attempts,
                                        max_attempts=max_attempts)
     imsave(file_save_path, image, check_contrast=False)
+    with _count_lock:
+        _COUNT += 1
+        logging.info(
+            '[Thread: {}] [Completed: {}/{}] Saved image: {}... to disk '
+            .format(current_thread_id, _COUNT, total, file_name[:10]))
+
     return 1
 
 
-def main(args):
+def main(args):  # pylint: disable=missing-function-docstring, too-many-branches
+
     del args
 
     if FLAGS.debug:
@@ -194,36 +214,47 @@ def main(args):
     if FLAGS.max_images > 0:
         if FLAGS.shuffle_urls:
             np.random.shuffle(urls)
-
         urls = urls[:FLAGS.max_images]
-        logging.warning('Downloading only {} urls'.format(
-            FLAGS.max_images))
+
+    total = len(urls)
+    logging.warning('Downloading {} urls'.format(total))
 
     status = {}
     future_to_url = {}
+
+
+    if FLAGS.random_sleep_time:
+        timeout = (FLAGS.max_sleep_time * FLAGS.max_attempts)
+    else:
+        timeout = (FLAGS.sleep_time * FLAGS.max_attempts)
+    logging.warning('Setting timeout={} seconds'.format(timeout))
 
     tik = time.time()
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=FLAGS.max_workers,
             thread_name_prefix='worker') as executor:
         for url in urls:
-            future = executor.submit(download_image_from_url,
-                                     url=url,
-                                     output_folder=FLAGS.output_folder,
-                                     sleep_time=FLAGS.sleep_time,
-                                     min_sleep_time=FLAGS.min_sleep_time,
-                                     max_sleep_time=FLAGS.max_sleep_time,
-                                     random_sleep_time=FLAGS.random_sleep_time,
-                                     num_attempts=1,
-                                     max_attempts=FLAGS.max_attempts)
+            future = executor.submit(
+                download_image_from_url,
+                url=url,
+                output_folder=FLAGS.output_folder,
+                sleep_time=FLAGS.sleep_time,
+                min_sleep_time=FLAGS.min_sleep_time,
+                max_sleep_time=FLAGS.max_sleep_time,
+                random_sleep_time=FLAGS.random_sleep_time,
+                num_attempts=0,
+                max_attempts=FLAGS.max_attempts,
+                total=total)
             future_to_url[future] = url
 
         for future in concurrent.futures.as_completed(future_to_url):
-            status[future_to_url[future]] = 'done' if future.result(
-            ) == 1 else 'failed'
+            try:
+                status[future_to_url[future]] = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                status[future_to_url[future]] = -1
     tok = time.time()
 
-    failed_urls = [url for url, result in status.items() if result == 'failed']
+    failed_urls = [url for url, result in status.items() if result == -1]
     if failed_urls:
         _dump_failed_urls(failed_urls)
         logging.warning(
